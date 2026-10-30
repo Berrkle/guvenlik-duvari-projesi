@@ -1,0 +1,124 @@
+# =====================================================================
+#  NovaTek Holding - Yazilim Ekibi - Palo Alto PA-3410 (HA cifti)
+#  Ornek PAN-OS 11.x "set" komutlari (egitim amacli, kisaltilmistir)
+#  Gercek ortamda bu yapilandirma Panorama sablon + cihaz grubu olarak itilir.
+#  App-ID adlari ve profil yollari PAN-OS surumune gore cihazda dogrulanmalidir.
+# =====================================================================
+
+configure
+
+# ---------- 1. Yonetim sertlestirme ----------
+set deviceconfig system hostname YZL-FW-01
+set deviceconfig system permitted-ip 10.250.10.0/24
+set deviceconfig system permitted-ip 10.250.50.0/24
+set deviceconfig setting management idle-timeout 10
+set deviceconfig setting management admin-lockout failed-attempts 3 lockout-time 5
+
+# ---------- 2. Arayuzler ve zone'lar ----------
+set network interface ethernet ethernet1/1 layer3 ip 203.0.113.50/29
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.20 tag 20 ip 10.50.20.1/23
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.25 tag 25 ip 10.50.25.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.30 tag 30 ip 10.50.30.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.40 tag 40 ip 10.50.40.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.45 tag 45 ip 10.50.45.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.60 tag 60 ip 10.50.60.1/28
+
+set zone UNTRUST network layer3 ethernet1/1
+set zone DEV network layer3 ethernet1/2.20
+set zone DEVOPS network layer3 ethernet1/2.25
+set zone QA network layer3 ethernet1/2.30
+set zone CICD network layer3 ethernet1/2.40
+set zone STAGING network layer3 ethernet1/2.45
+set zone BASTION network layer3 ethernet1/2.60
+# Bulut uretim ortamina giden IPsec tuneli ayri zone'da
+set network interface tunnel units tunnel.1 comment "Bulut prod VPC IPsec"
+set zone CLOUD_VPN network layer3 tunnel.1
+set zone DEV enable-user-identification yes
+set zone DEVOPS enable-user-identification yes
+set zone QA enable-user-identification yes
+
+# Internet tarafina zone koruma (flood / tarama)
+set network profiles zone-protection-profile ZP-Untrust flood tcp-syn enable yes
+set zone UNTRUST network zone-protection-profile ZP-Untrust
+
+# ---------- 3. Nesneler ----------
+set address DEV_NET ip-netmask 10.50.20.0/23
+set address DEVOPS_NET ip-netmask 10.50.25.0/24
+set address QA_NET ip-netmask 10.50.30.0/24
+set address CICD_NET ip-netmask 10.50.40.0/24
+set address STAGING_NET ip-netmask 10.50.45.0/24
+set address BASTION_NET ip-netmask 10.50.60.0/28
+set address YZL_ARTIFACTORY ip-netmask 10.50.40.20/32
+set address FQDN_GITHUB fqdn github.com
+set address FQDN_GITHUB_SSH fqdn ssh.github.com
+set address-group GRP_GIT_SSH static [ FQDN_GITHUB FQDN_GITHUB_SSH ]
+set address PROD_BULUT ip-netmask 172.20.0.0/16
+
+set profiles custom-url-category YZL_Git_Allow type "URL List" list [ github.com *.github.com *.githubusercontent.com gitlab.com *.gitlab.com ]
+set profiles custom-url-category YZL_Paket_Allow type "URL List" list [ registry.npmjs.org pypi.org files.pythonhosted.org repo.maven.apache.org api.nuget.org registry-1.docker.io *.docker.io ]
+
+# Tehdit istihbarati harici dinamik liste (EDL)
+set external-list TI_IP_Blok type ip url https://ti.novatek.example/blocklist.txt
+set external-list TI_IP_Blok type ip recurring hourly
+
+# ---------- 4. Guvenlik profil grubu ----------
+set profile-group YZL-Strict virus default
+set profile-group YZL-Strict spyware strict
+set profile-group YZL-Strict vulnerability strict
+set profile-group YZL-Strict url-filtering default
+set profile-group YZL-Strict file-blocking "strict file blocking"
+set profile-group YZL-Strict wildfire-analysis default
+
+# ---------- 5. SSL sifre cozme (decryption) ----------
+# KVKK: finans ve saglik kategorileri cozulmez (ust sirada)
+set rulebase decryption rules NoDecrypt-KVKK from any to UNTRUST source any destination any category [ financial-services health-and-medicine ] service any action no-decrypt type ssl-forward-proxy
+set rulebase decryption rules Decrypt-Dev from [ DEV DEVOPS QA CICD ] to UNTRUST source any destination any category any service any action decrypt type ssl-forward-proxy profile default
+
+# ---------- 6. Guvenlik kurallari (yukaridan asagi) ----------
+set rulebase security rules Tehdit-EDL-Engel-Cikis from any to UNTRUST source any destination TI_IP_Blok application any service any action deny log-end yes
+set rulebase security rules Tehdit-EDL-Engel-Giris from UNTRUST to any source TI_IP_Blok destination any application any service any action deny log-end yes
+
+set rulebase security rules Tunelleme-Engel from [ DEV DEVOPS QA CICD ] to UNTRUST source any destination any application [ tor ngrok ] service any action deny log-end yes
+
+set rulebase security rules Git-HTTPS from [ DEV DEVOPS CICD ] to UNTRUST source any source-user [ "novatek\yzl-gelistirici" "novatek\yzl-devops" "novatek\svc-cicd" ] destination any category YZL_Git_Allow application [ ssl web-browsing git ] service application-default action allow profile-setting group YZL-Strict log-end yes
+set rulebase security rules Git-SSH from [ DEV DEVOPS CICD ] to UNTRUST source any destination GRP_GIT_SSH application [ ssh git ] service application-default action allow profile-setting group YZL-Strict log-end yes
+
+set rulebase security rules Paket-Depolari from [ DEV CICD ] to UNTRUST source any destination any category YZL_Paket_Allow application [ ssl web-browsing ] service application-default action allow profile-setting group YZL-Strict log-end yes
+
+set rulebase security rules Ic-Artifact-Deposu from [ DEV QA ] to CICD source any destination YZL_ARTIFACTORY application ssl service application-default action allow profile-setting group YZL-Strict log-end yes
+
+# CI/CD runner'lari yalnizca bulut STAGING/deploy hedeflerine; dogrudan prod erisimi Bastion uzerinden
+set address BULUT_STAGING ip-netmask 172.21.0.0/16
+set rulebase security rules CICD-Bulut from CICD to CLOUD_VPN source CICD_NET source-user "novatek\svc-cicd" destination BULUT_STAGING application [ ssl ssh ] service application-default action allow profile-setting group YZL-Strict log-end yes
+
+set rulebase security rules Dev-Prod-Dogrudan-Engel from [ DEV QA CICD STAGING ] to any source any destination PROD_BULUT application any service any action deny log-end yes
+
+set rulebase security rules Bastion-Giris from DEVOPS to BASTION source any source-user "novatek\yzl-prod-yetkili" destination BASTION_NET application [ ssl ssh ] service application-default action allow profile-setting group YZL-Strict log-end yes
+set rulebase security rules Bastion-Prod from BASTION to CLOUD_VPN source BASTION_NET destination PROD_BULUT application [ ssh ssl rdp ] service application-default action allow profile-setting group YZL-Strict log-end yes
+
+set rulebase security rules Kisisel-Bulut-Engel from [ DEV DEVOPS QA ] to UNTRUST source any destination any application [ dropbox mega wetransfer pastebin ] service any action deny log-end yes
+set rulebase security rules SSH-Diger-Engel from [ DEV DEVOPS QA ] to UNTRUST source any destination any application ssh service any action deny log-end yes
+
+set rulebase security rules Gelistirici-Web from [ DEV DEVOPS QA ] to UNTRUST source any source-user [ "novatek\yzl-gelistirici" "novatek\yzl-devops" "novatek\yzl-qa" ] destination any application [ ssl web-browsing ] service application-default action allow profile-setting group YZL-Strict log-end yes
+
+set rulebase security rules CICD-Diger-Engel from CICD to UNTRUST source any destination any application any service any action deny log-end yes
+
+set rulebase security rules Tumunu-Reddet from any to any source any destination any application any service any action deny log-end yes
+
+# Varsayilan interzone kurali da loglansin
+set rulebase default-security-rules rules interzone-default action deny log-end yes
+
+# ---------- 7. Kaynak NAT ----------
+set rulebase nat rules Internet-SNAT from [ DEV DEVOPS QA CICD ] to UNTRUST source any destination any service any source-translation dynamic-ip-and-port interface-address interface ethernet1/1
+
+# ---------- 8. Loglari SIEM'e iletme ----------
+set log-settings syslog SIEM-Wazuh server wazuh transport SSL port 6514 format IETF server 10.10.40.60
+# Log iletim profili tum kurallara "log-setting" olarak baglanir (Panorama'da cihaz grubu varsayilani).
+
+# ---------- 9. HA ----------
+set deviceconfig high-availability enabled yes
+set deviceconfig high-availability group group-id 50
+set deviceconfig high-availability group mode active-passive
+set deviceconfig high-availability group election-option device-priority 100
+
+commit
