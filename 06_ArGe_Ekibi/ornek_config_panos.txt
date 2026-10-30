@@ -1,0 +1,80 @@
+# =====================================================================
+#  NovaTek Holding - Ar-Ge Ekibi - Palo Alto PA-1420 (HA cifti)
+#  Ornek PAN-OS 11.x "set" komutlari (egitim amacli, kisaltilmistir)
+#  Yonetim sertlestirme, log iletimi ve HA bloklari Yazilim Ekibi ile aynidir
+#  (Panorama sablonundan gelir).
+#  App-ID adlari ve profil yollari PAN-OS surumune gore cihazda dogrulanmalidir.
+# =====================================================================
+
+configure
+
+set deviceconfig system hostname ARG-FW-01
+
+# ---------- Zone'lar ----------
+set network interface ethernet ethernet1/1 layer3 ip 192.0.2.60/29
+set zone UNTRUST network layer3 ethernet1/1
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.20 tag 20 ip 10.60.20.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.40 tag 40 ip 10.60.40.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.45 tag 45 ip 10.60.45.1/28
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.100 tag 100 ip 10.60.100.1/24
+set network interface ethernet ethernet1/2 layer3 units ethernet1/2.70 tag 70 ip 10.60.70.1/24
+set zone ARASTIRMA network layer3 ethernet1/2.20
+set zone VERI_GPU network layer3 ethernet1/2.40
+set zone TRANSFER network layer3 ethernet1/2.45
+set zone LAB_IZOLE network layer3 ethernet1/2.100
+set zone MISAFIR network layer3 ethernet1/2.70
+set zone ARASTIRMA enable-user-identification yes
+
+# ---------- Nesneler ----------
+set address ARASTIRMA_NET ip-netmask 10.60.20.0/24
+set address VERI_GPU_NET ip-netmask 10.60.40.0/24
+set address ARG_TRANSFER ip-netmask 10.60.45.10/32
+set address LAB_IZOLE_NET ip-netmask 10.60.100.0/24
+set address RFC1918_10 ip-netmask 10.0.0.0/8
+
+set profiles custom-url-category ARG_Akademik_Allow type "URL List" list [ ieeexplore.ieee.org dl.acm.org arxiv.org *.arxiv.org www.scopus.com www.webofscience.com www.iso.org patents.google.com www.turkpatent.gov.tr ]
+set profiles custom-url-category ARG_Veri_Ortak_Allow type "URL List" list [ data.ortak-universite.example ]
+
+# ---------- Profil grubu (en siki) ----------
+set profile-group ARG-Max virus default
+set profile-group ARG-Max spyware strict
+set profile-group ARG-Max vulnerability strict
+set profile-group ARG-Max url-filtering default
+set profile-group ARG-Max file-blocking "strict file blocking"
+set profile-group ARG-Max wildfire-analysis default
+
+# ---------- SSL sifre cozme ----------
+set rulebase decryption rules NoDecrypt-KVKK from any to UNTRUST source any destination any category [ financial-services health-and-medicine ] service any action no-decrypt type ssl-forward-proxy
+set rulebase decryption rules Decrypt-ArGe from [ ARASTIRMA TRANSFER ] to UNTRUST source any destination any category any service any action decrypt type ssl-forward-proxy profile default
+
+# ---------- Guvenlik kurallari ----------
+# Izole laboratuvar: yalnizca transfer sunucusuna SFTP, baska hicbir sey
+set rulebase security rules Lab-Transfer-Giris from LAB_IZOLE to TRANSFER source LAB_IZOLE_NET source-user "novatek\arg-lab-sorumlu" destination ARG_TRANSFER application sftp service application-default action allow profile-setting group ARG-Max log-end yes
+set rulebase security rules Lab-Her-Sey-Engel from LAB_IZOLE to any source any destination any application any service any action deny log-end yes
+set rulebase security rules Diger-Lab-Engel from any to LAB_IZOLE source any destination any application any service any action deny log-end yes
+
+# Arastirma -> GPU/veri ve transfer
+set rulebase security rules Arastirma-GPU-Veri from ARASTIRMA to VERI_GPU source ARASTIRMA_NET source-user "novatek\arg-arastirmaci" destination VERI_GPU_NET application [ ssh ssl jupyter ms-ds-smb ] service application-default action allow profile-setting group ARG-Max log-end yes
+set rulebase security rules Arastirma-Transfer from ARASTIRMA to TRANSFER source ARASTIRMA_NET destination ARG_TRANSFER application [ ssl sftp ] service application-default action allow profile-setting group ARG-Max log-end yes
+
+# Transfer sunucusu -> yalnizca onayli ortak veri portallari
+set rulebase security rules Transfer-Onayli-Disi from TRANSFER to UNTRUST source ARG_TRANSFER destination any category ARG_Veri_Ortak_Allow application ssl service application-default action allow profile-setting group ARG-Max log-end yes
+
+# GPU/veri sunuculari internete cikmaz
+set rulebase security rules VeriGPU-Internet-Engel from VERI_GPU to UNTRUST source any destination any application any service any action deny log-end yes
+
+# Internete izin listesi
+set rulebase security rules Kisisel-Bulut-Engel from [ ARASTIRMA TRANSFER ] to UNTRUST source any destination any application [ dropbox google-drive-web mega wetransfer pastebin ] service any action deny log-end yes
+set rulebase security rules Tunelleme-Engel from any to UNTRUST source any destination any application [ tor ngrok ] service any action deny log-end yes
+set rulebase security rules Akademik-Kaynaklar from ARASTIRMA to UNTRUST source ARASTIRMA_NET source-user "novatek\arg-arastirmaci" destination any category ARG_Akademik_Allow application [ ssl web-browsing ] service application-default action allow profile-setting group ARG-Max log-end yes
+set rulebase security rules Arama-Motorlari from ARASTIRMA to UNTRUST source ARASTIRMA_NET destination any category search-engines application [ ssl web-browsing ] service application-default action allow profile-setting group ARG-Max log-end yes
+set rulebase security rules Arastirma-Diger-Internet-Engel from ARASTIRMA to UNTRUST source any destination any application any service any action deny log-end yes
+
+# Misafir
+set rulebase security rules Misafir-Ic-Engel from MISAFIR to any source any destination RFC1918_10 application any service any action deny log-end yes
+set rulebase security rules Misafir-Internet from MISAFIR to UNTRUST source any destination any application [ ssl web-browsing ] service application-default action allow log-end yes
+
+set rulebase security rules Tumunu-Reddet from any to any source any destination any application any service any action deny log-end yes
+set rulebase default-security-rules rules interzone-default action deny log-end yes
+
+commit
